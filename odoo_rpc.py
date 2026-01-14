@@ -9,13 +9,26 @@ from dotenv import load_dotenv
 load_dotenv()
 log = logging.getLogger("odoo_rpc")
 
-# Requeridos en .env
-ODOO_JSONRPC = os.getenv(
-    "ODOO_JSONRPC"
-)  # ejemplo: https://tuinstancia.odoo.com/jsonrpc
-DB = os.getenv("DB")
-UID = int(os.getenv("UID", "0"))
-PWD = os.getenv("PWD")
+# ===== SWITCH DE AMBIENTE =====
+# Lee la variable USE_PRODUCTION del .env
+USE_PRODUCTION = os.getenv("USE_PRODUCTION", "false").lower() in ["true", "1", "yes"]
+
+# Selecciona las credenciales según el ambiente
+if USE_PRODUCTION:
+    log.info("🚀 USANDO AMBIENTE DE PRODUCCIÓN")
+    ODOO_JSONRPC = os.getenv("PROD_ODOO_JSONRPC")
+    DB = os.getenv("PROD_ODOO_DB")
+    UID = int(os.getenv("PROD_ODOO_UID", "0"))
+    PWD = os.getenv("PROD_ODOO_PASSWORD")
+    CALLBACK_URL = os.getenv("PROD_CALLBACK_URL")
+else:
+    log.info("🧪 USANDO AMBIENTE DE PRUEBAS")
+    ODOO_JSONRPC = os.getenv("TEST_ODOO_JSONRPC")
+    DB = os.getenv("TEST_ODOO_DB")
+    UID = int(os.getenv("TEST_ODOO_UID", "0"))
+    PWD = os.getenv("TEST_ODOO_PASSWORD")
+    CALLBACK_URL = os.getenv("TEST_CALLBACK_URL")
+
 TIMEOUT = int(os.getenv("ODOO_TIMEOUT", "35"))
 
 

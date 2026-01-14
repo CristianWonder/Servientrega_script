@@ -9,18 +9,33 @@ from dotenv import load_dotenv
 from xml.etree.ElementTree import fromstring
 
 # --------------------------------------------------
-# ENV
+# ENV & SWITCHES
 # --------------------------------------------------
 load_dotenv()
 
 PORT = int(os.getenv("PORT", "5000"))
 
-SERVI_URL_QA = os.getenv("SERVI_URL_QA")
-SERVI_URL_PROD = os.getenv("SERVI_URL_PROD")
+# Switch de Odoo (se importa de odoo_rpc pero aquí lo usamos para logs)
+from odoo_rpc import USE_PRODUCTION
+
+# Switch de Servientrega
+SERVI_USE_PRODUCTION = os.getenv("SERVI_USE_PRODUCTION", "false").lower() in [
+    "true",
+    "1",
+    "yes",
+]
+
+if SERVI_USE_PRODUCTION:
+    SERVI_URL = os.getenv("SERVI_URL_PROD")
+    SERVI_MSG = "🚀 SERVIENTREGA: PRODUCCIÓN"
+else:
+    SERVI_URL = os.getenv("SERVI_URL_QA")
+    SERVI_MSG = "🧪 SERVIENTREGA: PRUEBAS (QA)"
+
 SERVI_TIMEOUT = int(os.getenv("SERVI_TIMEOUT", "35"))
 
-if not SERVI_URL_QA:
-    raise RuntimeError("SERVI_URL_QA no está definida en el .env")
+if not SERVI_URL:
+    raise RuntimeError("No se pudo determinar SERVI_URL (faltan variables en .env)")
 
 # --------------------------------------------------
 # LOGGING
@@ -37,6 +52,8 @@ logger = logging.getLogger("servientrega_webhook")
 # --------------------------------------------------
 app = Flask(__name__)
 logger.info("🔥 webhook_servientrega_ws22.py CARGADO")
+logger.info("📍 ODOO: %s", "🚀 PRODUCCIÓN" if USE_PRODUCTION else "🧪 PRUEBAS")
+logger.info("📍 %s", SERVI_MSG)
 
 
 # --------------------------------------------------
@@ -61,11 +78,19 @@ def error_response(code, detail, http_code=400):
 
 
 def safe_read_one(model, record_id, fields):
-    logger.info("Leyendo %s ID=%s", model, record_id)
-    ok, resp, _ = safe_read(model, [int(record_id)], fields)
-    if not ok or "result" not in resp or not resp["result"]:
+    if record_id is None:
+        logger.warning("Intentando leer %s con ID=None", model)
         return None
-    return resp["result"][0]
+    try:
+        logger.info("Leyendo %s ID=%s", model, record_id)
+        ok, resp, _ = safe_read(model, [int(record_id)], fields)
+        if not ok or "result" not in resp or not resp["result"]:
+            logger.warning("No se encontró %s ID=%s", model, record_id)
+            return None
+        return resp["result"][0]
+    except (ValueError, TypeError) as e:
+        logger.error("Error al convertir ID: %s", str(e))
+        return None
 
 
 # --------------------------------------------------
@@ -151,8 +176,8 @@ def construir_payload_ws22(picking, partner, valor_real=5000, contenido="PRODUCT
 # WS22 SEND SOAP (QA) - CargueMasivoExterno
 # --------------------------------------------------
 def enviar_ws22_test(payload_ws22: dict) -> dict:
-    logger.info("🚀 Enviando WS22 SOAP (QA) - CargueMasivoExterno")
-    logger.info("🌐 URL usada: %s", SERVI_URL_QA)
+    logger.info("🚀 Enviando WS22 SOAP")
+    logger.info("🌐 URL usada: %s", SERVI_URL)
 
     envio = payload_ws22["envios"][0]
 
@@ -277,7 +302,7 @@ def enviar_ws22_test(payload_ws22: dict) -> dict:
     logger.info("📤 SOAP XML ENVIADO:\n%s", soap_xml)
 
     resp = requests.post(
-        SERVI_URL_QA,
+        SERVI_URL,
         data=soap_xml.encode("utf-8"),
         headers=headers,
         timeout=SERVI_TIMEOUT,
@@ -325,7 +350,7 @@ def generar_pdf_guia(num_guia: str) -> dict:
     logger.info("📤 Solicitando PDF de guía...")
 
     resp = requests.post(
-        SERVI_URL_QA,
+        SERVI_URL,
         data=soap_xml.encode("utf-8"),
         headers=headers,
         timeout=SERVI_TIMEOUT,
@@ -441,6 +466,23 @@ def webhook():
     logger.info("Payload recibido: %s", payload)
 
     picking_id = payload.get("id")
+
+    if picking_id is None or str(picking_id).strip() == "":
+        return error_response(
+            "missing_id",
+            "Debe enviar 'id' (stock.picking id) en el JSON. Ej: {'id': 331}",
+            400,
+        )
+
+    try:
+        picking_id = int(picking_id)
+    except (TypeError, ValueError):
+        return error_response(
+            "invalid_id",
+            "El campo 'id' debe ser numérico.",
+            400,
+        )
+
     picking = safe_read_one(
         "stock.picking",
         picking_id,
@@ -459,11 +501,37 @@ def webhook():
         ],
     )
 
+    if not picking:
+        return error_response(
+            "picking_not_found",
+            f"No se encontró stock.picking con ID={picking_id}",
+            404,
+        )
+
+    # 🛡️ VALIDACIÓN DE IDEMPOTENCIA (Solo en Producción para evitar cobros dobles)
+    # Si ya tiene guía, devolvemos la existente y no llamamos a Servientrega
+    if SERVI_USE_PRODUCTION and picking.get("carrier_tracking_ref"):
+        guia = picking["carrier_tracking_ref"]
+        url = f"https://www.servientrega.com/rastreo/{guia}"
+        logger.info(
+            "⚠️ El picking %s ya tiene guía: %s. Saltando duplicado.", picking_id, guia
+        )
+        return (
+            jsonify(
+                {
+                    "ok": True,
+                    "guia": guia,
+                    "url": url,
+                    "message": "Guía ya existente en Odoo. No se generó una nueva.",
+                }
+            ),
+            200,
+        )
+
     # VALIDACIÓN DUAL: Check O Transportista
     es_check = picking.get("x_studio_servientrega")
     es_carrier = False
     if picking.get("carrier_id"):
-        # carrier_id es [id, "Nombre"]
         c_name = str(picking["carrier_id"][1]).upper()
         if "SERVIENTREGA" in c_name:
             es_carrier = True
@@ -475,27 +543,36 @@ def webhook():
             es_carrier,
         )
         return jsonify({"ok": True, "skipped": True}), 200
+
     partner = safe_read_one(
         "res.partner",
         picking["partner_id"][0],
         ["name", "street", "city", "phone", "mobile", "vat"],
     )
 
-    # Calcular Valor Declarado Real sumando líneas
-    moves = safe_read(
+    if not partner:
+        return error_response(
+            "partner_not_found",
+            f"No se encontró res.partner asociado al picking (partner_id={picking.get('partner_id')}).",
+            404,
+        )
+
+    ok_moves, resp_moves, _ = safe_read(
         "stock.move",
-        picking["move_ids"],
+        picking.get("move_ids") or [],
         ["product_id", "product_uom_qty", "price_unit"],
-    )[1].get("result", [])
+    )
+    moves = (resp_moves or {}).get("result", []) if ok_moves else []
+
     valor_total = sum(
-        [m.get("product_uom_qty", 0) * m.get("price_unit", 0) for m in moves]
+        [(m.get("product_uom_qty") or 0) * (m.get("price_unit") or 0) for m in moves]
     )
     if valor_total < 5000:
-        valor_total = 5000  # Mínimo Servientrega
+        valor_total = 5000
 
     # Obtener nombres de productos
     nombres = [m["product_id"][1] for m in moves if m.get("product_id")]
-    contenido = ", ".join(nombres)[:35]  # Servientrega limita caracteres a veces
+    contenido = ", ".join(nombres)[:35]
     if not contenido:
         contenido = "MERCANCIA GENERAL"
 
@@ -522,4 +599,4 @@ def webhook():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, debug=True)
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)

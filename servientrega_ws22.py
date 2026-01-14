@@ -9,7 +9,20 @@ from dotenv import load_dotenv
 load_dotenv()
 log = logging.getLogger("servientrega_ws22")
 
-SERVI_URL = os.getenv("SERVI_URL_QA")
+# ===== SWITCH DE AMBIENTE SERVIENTREGA =====
+SERVI_USE_PRODUCTION = os.getenv("SERVI_USE_PRODUCTION", "false").lower() in [
+    "true",
+    "1",
+    "yes",
+]
+
+if SERVI_USE_PRODUCTION:
+    log.info("🚚 SERVIENTREGA: USANDO ENDPOINT DE PRODUCCIÓN")
+    SERVI_URL = os.getenv("SERVI_URL_PROD")
+else:
+    log.info("🧪 SERVIENTREGA: USANDO ENDPOINT DE PRUEBAS (QA)")
+    SERVI_URL = os.getenv("SERVI_URL_QA")
+
 SERVI_LOGIN = os.getenv("SERVI_LOGIN")
 SERVI_PWD_ENC = os.getenv("SERVI_PWD_ENC")
 SERVI_COD_FACT = os.getenv("SERVI_COD_FACT")
