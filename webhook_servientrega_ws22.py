@@ -465,12 +465,13 @@ def webhook():
     payload = request.get_json(silent=True) or {}
     logger.info("Payload recibido: %s", payload)
 
-    picking_id = payload.get("id")
+    # Buscamos el ID en 'id' o en '_id' (formato común en Odoo)
+    picking_id = payload.get("id") or payload.get("_id")
 
     if picking_id is None or str(picking_id).strip() == "":
         return error_response(
             "missing_id",
-            "Debe enviar 'id' (stock.picking id) en el JSON. Ej: {'id': 331}",
+            "No se encontró 'id' o '_id' en el JSON. Payload recibido: " + str(payload),
             400,
         )
 
